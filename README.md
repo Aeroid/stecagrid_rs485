@@ -29,7 +29,7 @@ As far as I can tell its a s simple request and response protocol taht Steca had
  
 ### To Do
 - CRC: without the CRC calculation no datagram can be synthesized.
-- Total yield: assumed to be part of msg topics 0xef or 0x08 of the 0x65 response group. Both contain five byte data that could not be decoded, yet.
+- Total yield: assumed to be part of msg topics 0xf1 or 0x08 of the 0x65 response group. Both contain five byte data that could not be decoded, yet.
 
 ### Examples 
 
