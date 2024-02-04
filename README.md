@@ -17,7 +17,7 @@ As far as I can tell its a s simple request and response protocol taht Steca had
   - Panel current (0x24)
   - Panel power (0x22)
   - Daily yield (0x3c)
-  - Total yield = ?
+  - Total yield = (0xf1)
   - Time (0x05)
 - Data is respresented as Pascal-type strings (pre-fixed by their length as a 16-bit word), proprietary 3-byte floats (pre-fixed by a unit byte) in the payload. Pre-fixed length field are used here and there. Unit prefixes are:
   - V (0x05)
@@ -29,7 +29,6 @@ As far as I can tell its a s simple request and response protocol taht Steca had
  
 ### To Do
 - CRC: without the CRC calculation no datagram can be synthesized.
-- Total yield: assumed to be part of msg topics 0xf1 or 0x08 of the 0x65 response group. Both contain five byte data that could not be decoded, yet.
 
 ### Examples 
 
