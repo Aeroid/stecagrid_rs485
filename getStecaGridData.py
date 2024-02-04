@@ -25,6 +25,7 @@ SG_VERSIONS      = bytes.fromhex("02 01 00 0c 01 7b c6 20 03 79 8c 03")
 SG_SERIAL        = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 09 5e 85 6e 03")
 SG_TIME          = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 05 5a 3a 44 03")
 SG_DAILY_YIELD   = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 3c 91 e1 c9 03")
+SG_TOTAL_YIELD   = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 f1 46 cc 79 03")
 SG_AC_POWER      = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 29 7e 98 5b 03")
 ID_AC_POWER      = 0x29
  
@@ -61,6 +62,12 @@ def decode_stecaFloat_a(ac_bytes):
 
     return [facpower, unit]
 
+def decode_TotalYield_a(ba):
+    #five byte array, 
+    bits = ba[3] << 24 | ba[2] << 16 | ba[1] << 8 | ba[0]
+    ieee , = struct.unpack('f', struct.pack('I', bits))
+    return [ieee, "Wh"]
+
 def process_steca485(t):
     """
     parse telegram from StecaGrid RS485 protocol
@@ -75,7 +82,7 @@ def process_steca485(t):
     :param str telegram:
     """    
     if is_one_full_telegram(t):
-        results = [t[7], t[11]]
+        results = [t[4], t[5], t[7], t[11]]
         total_length = (t[2] << 8 | t[3])
         if DEBUG:
             print("#",format_hex_bytes(t))
@@ -89,30 +96,30 @@ def process_steca485(t):
             print(f"crc2: {t[-3]:02x}{t[-2]:02x}"," ",end="")
             print() #        print("stop:",t[-1])
             # Payload started 7
-            #print("# payload:", format_hex_bytes(t[7:-3]) ,"",end="")
-            #print("  ", format_printable(t[7:-3]))
-        if t[7] == 0x40: # Requests
+            print("# payload:", format_hex_bytes(t[7:-3]) ,"",end="")
+            print("  ", format_printable(t[7:-3]))
+        if t[7] == 0x40: # 64: Requests
             topic=""
-            if t[11] == 0x1d:
+            if t[11] == 0x1d: # 29:
                 topic = " (Nominal Power)"
-            elif t[11] == 0x22:
+            elif t[11] == 0x22: # 34:
                 topic = " (Panel Power)"
-            elif t[11] == 0x23:
+            elif t[11] == 0x23: # 35: 
                 topic = " (Panel Voltage)"
-            elif t[11] == 0x24:
+            elif t[11] == 0x24: # 36:
                 topic = " (Panel Current)"
-            elif t[11] == 0x29:
+            elif t[11] == 0x29: # 41:
                 topic = " (ACPower)"
-            elif t[11] == 0x3c:
+            elif t[11] == 0x3c: # 60:
                 topic = " (Daily Yield)"
             if DEBUG:
                 print(f"# RequestA for 0x{t[11]:02x}{topic} from {t[4]}")
-        elif t[7] == 0x41: # Responses
+        elif t[7] == 0x41: # 65: Responses
             if t[8] == 0x00:
                 len = (t[9] << 8 | t[10])
                 if DEBUG:
                     print(f"# ReponseA for 0x{t[11]:02x} from {t[4]} len={len}")
-                if t[11] == 0x51: # Label Value Value Value Value byte Label Value Value Value Value byte
+                if t[11] == 0x51: # 81: Label Value Value Value Value byte Label Value Value Value Value byte
                     i_labelA = 15
                     i_valA1 = i_labelA + (t[i_labelA-2] << 8 | t[i_labelA-1])
                     i_valA2 = i_valA1+4
@@ -137,7 +144,7 @@ def process_steca485(t):
                             decode_stecaFloat(t[i_valB2:i_valB3]), 
                             decode_stecaFloat(t[i_valB3:i_valB4]), 
                             decode_stecaFloat(t[i_valB4:i_valB4+4])) 
-                elif t[11] == 0x3c:
+                elif t[11] == 0x3c: # 60:
                     label = "Daily Yield"
                     val = decode_stecaFloat_a(t[12:16])
                     results += [label, val]
@@ -149,35 +156,35 @@ def process_steca485(t):
                     results += [label, val]
                     if DEBUG:
                         print("#", label, val[0], val[1])
-        elif t[7] == 0x64: # Requests
+        elif t[7] == 0x64: # 100: Requests
             if DEBUG:
                 print(f"# RequestB for 0x{t[11]:02x} from {t[4]}")
-        elif t[7] == 0x65: # Responses
+        elif t[7] == 0x65: # 101: Responses 
             if DEBUG:
                 print(f"# ReponseB for 0x{t[11]:02x} from {t[4]}")
-            if t[11] == 0xF1: #  ???
-                results += ["???", format_hex_bytes(t[12:17])]
+            if t[11] == 0xF1: #  241: Total Yield
+                results += ["Total Yield", decode_TotalYield_a(t[12:16])]
                 if DEBUG:
                     print("# (",format_hex_bytes(t[12:17]),")")
-                    print("#", decode_stecaFloat(t[12:16]))
-            elif t[11] == 0x05: # Time
+                    print("#", decode_TotalYield_a(t[12:16]))
+            elif t[11] == 0x05: # 5: Time 
                 time = datetime.datetime(2000+t[12], t[13], t[14], t[15], t[16], t[17]) # ignoring final 3 byte for now. TZ, millis, ...?
                 results += ["Time", time]
                 if DEBUG:
                     print(f"# {time} (",format_hex_bytes(t[12:21]),")")
-            elif t[11] == 0x08: #  ???
+            elif t[11] == 0x08: # 8: ???
                 results += ["???", format_hex_bytes(t[12:17])]
                 if DEBUG:
                     print("# (",format_hex_bytes(t[12:17]),")")
                     print("#", decode_stecaFloat(t[12:16]))
-            elif t[11] == 0x09: # Serial
+            elif t[11] == 0x09: # 9: Serial
                 results += ["Serial Number", t[12:-4].decode("ascii")]
                 if DEBUG:
                     print("# (",format_hex_bytes(t[12:17]),")")
                     print("#", decode_stecaFloat(t[12:16]))
             else:
                 results += ["???", format_hex_bytes(t[12:17])]
-        elif t[7] == 0x21: # Responses
+        elif t[7] == 0x21: # Responses 
             if t[8] == 0x00:
                 len = (t[9] << 8 | t[10])
                 results += ["???", format_hex_bytes(t[12:17])]
@@ -218,16 +225,16 @@ def getStecaGridResult(req):
     results = process_steca485(in_data)
     if DEBUG:
         print(results)
-    if results:    
-        return results[3]
+    if results and results[5][1] != "NUL":    
+        return results[5]
 
 if __name__ == "__main__":
     port = serial.Serial(baudrate=SERIAL_BAUDRATE, port=SERIAL_DEVICE, timeout=SERIAL_TIMEOUT, parity=SERIAL_PARITY, stopbits=SERIAL_SBIT, bytesize=SERIAL_BYTES, xonxoff=0, rtscts=0)
     if DEBUG:
         print(port.get_settings())
    
-    ac_power = getStecaGridResult(SG_AC_POWER)
-    if ac_power:
-        print(ac_power[0])
+    value = getStecaGridResult(SG_TOTAL_YIELD)
+    if value:
+        print(value[0])
         
     port.close()
