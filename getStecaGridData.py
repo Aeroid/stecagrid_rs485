@@ -15,87 +15,219 @@ SERIAL_TIMEOUT  = 1
 #  02 01 00 10 01 C9 65 40 03 00 01 29 7E 29 BE 03
 #  Example of a StecaGrid answer:
 #  02 01 00 1F C9 01 84 41 00 00 10 29 00 00 08 41 43 50 6F 77 65 72 3A 0B A2 78 85 FB 49 4C 03
-#  Other Example
-#  02 01 00 1e 7b 01 3d 41 00 00 0f 29 00 00 07 41 43 50 6f 77 65 72 00 00 01 2d 44 7b b1 03 02 01 00 10 01 7b b5 40 03 00 01 51 a6 d4 c0 03 
-#  ....{.=A...)...ACPower...-D{.......{.@...Q....
 
-SG_AC_POWER_RESPONSE = [
-        0x02, #   2 = 
-        0x01, #   1 = 
-        0x00, #   0 = 
-        0x10, #  16 = 
-        0x01, #   1 = 
-        0xC9, # 201 = 
-        0x65, # 101 = 
-        0x40, #  64 = 
-        0x03, #   3 = 
-        0x00, #   0 = 
-        0x01, #   1 = 
-        0x29, #  41 = 
-        0x7E, # 126 = 
-        0x29, #  41 = 
-        0xBE, # 190 = 
-        0x03  #   3 = 
-    ]
+# Recorded packets of StecaGrid SEM (id #123/0x7b) talking to StecaGrid 3600 (id #1) for replay
+SG_NOMINAL_POWER = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 1d 72 30 95 03")
+SG_PANEL_POWER   = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 22 77 12 ee 03")
+SG_PANEL_VOLTAGE = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 23 78 78 e4 03")
+SG_PANEL_CURRENT = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 24 79 a0 b6 03")
+SG_VERSIONS      = bytes.fromhex("02 01 00 0c 01 7b c6 20 03 79 8c 03")
+SG_SERIAL        = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 09 5e 85 6e 03")
+SG_TIME          = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 05 5a 3a 44 03")
+SG_DAILY_YIELD   = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 3c 91 e1 c9 03")
+SG_AC_POWER      = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 29 7e 98 5b 03")
+ID_AC_POWER      = 0x29
+ 
+# klaute's original packet, different SEM ID
+#SG_AC_POWER      = bytes.fromhex("02 01 00 10 01 C9 65 40 03 00 01 29 7E 29 BE 03") 
 
-def getStecaGridACPower():
-  msg = SG_AC_POWER_RESPONSE
+# a few packets for inverter id #7
+#SG_AC_POWER      = bytes.fromhex("02 01 00 10 07 7b b9 40 03 00 01 29 7e b8 88 03") #id7
+#SG_NOMINAL_POWER = bytes.fromhex("02 01 00 10 07 7b b9 40 03 00 01 1d 72 10 46 03") #id7 
+#SG_ENS           = bytes.fromhex("02 01 00 10 07 7b b9 40 03 00 01 51 a6 f4 13 03") #id7
 
-  with port as s:
-    if DEBUG:
-        print("serial write " + str(msg))
-
-    s.write(msg)
-
-    in_data = s.read(size=31)
-    if DEBUG:
-        print("ser read " + str(in_data))
-        i = 0
-        for d in in_data:
-            print(str(i) + " " + str(in_data[i]) + " " + chr(in_data[i]) + " 0x%02x" % in_data[i])
-            i = i + 1
-
-    if len(in_data) < 30:
-        if DEBUG:
-            print("received data is too short: "+str(len(in_data)))
-        return 0
-    
-    ac_bytes = in_data[23:27]
-    if len(in_data) == 30:
-        ac_bytes = in_data[22:26] 
-
+def decode_stecaFloat_a(ac_bytes):
     if ac_bytes[0] == 0x0B:
-        # AC power is > 0
-        iacpower = ((ac_bytes[3] << 8 | ac_bytes[1]) << 8 | ac_bytes[2]) << 7 # formula to float - conversion according to Steca
+        unit = "W"
+    elif ac_bytes[0] == 0x07:
+        unit = "A"
+    elif ac_bytes[0] == 0x05:
+        unit = "V"
+    elif ac_bytes[0] == 0x0D:
+        unit = "Hz"
+    elif ac_bytes[0] == 0x09:
+        unit = "Wh"
+    elif ac_bytes[0] == 0x00:
+        unit = "NUL"
+    else:
+        unit = f'0x{ac_bytes[0]:02x}'
 
+    iacpower = ((ac_bytes[3] << 8 | ac_bytes[1]) << 8 | ac_bytes[2]) << 7 # formula to float - conversion according to Steca
+    facpower, = struct.unpack('f', struct.pack('I', iacpower))
+
+    if DEBUG:
+        print("# i: 0x%0X" % iacpower,"=", str(iacpower))
+        print("# f:", facpower)
+
+    return [facpower, unit]
+
+def process_steca485(t):
+    """
+    parse telegram from StecaGrid RS485 protocol
+    
+    returns an array
+        msg group
+        msg topic
+        clear text topic
+        values
+        or payload has hex string
+
+    :param str telegram:
+    """    
+    if is_one_full_telegram(t):
+        results = [t[7], t[11]]
+        total_length = (t[2] << 8 | t[3])
         if DEBUG:
-            print("iacpower 0x%0X" % iacpower)
-            print("iacpower " + str(iacpower))
-            print("in_data[24-27] 0x%02x%02x%02x" % (ac_bytes[1] , ac_bytes[2] , ac_bytes[3]))
-
-        tmp_data = [ 0, int(ac_bytes[1]), int(ac_bytes[2]), int(ac_bytes[3]) ]
-
-        facpower, = struct.unpack('f', struct.pack('I', iacpower))
-
-        if DEBUG:
-            print("AC Power:", facpower)
-
-        return facpower
-    elif ac_bytes[0] == 0x0C:
-        # AC power is 0
-        return 0
+            print("#",format_hex_bytes(t))
+            print("# dgram:","",end="")
+#            print("# ",t[4:-1])
+#            print("start:",t[0]," ",end="")
+            print("to:",t[4]," ",end="")
+            print("from:",t[5]," ",end="")
+            print("len:",total_length," ",end="")
+            print(f"crc1: {t[6]:02x}"," ",end="")
+            print(f"crc2: {t[-3]:02x}{t[-2]:02x}"," ",end="")
+            print() #        print("stop:",t[-1])
+            # Payload started 7
+            #print("# payload:", format_hex_bytes(t[7:-3]) ,"",end="")
+            #print("  ", format_printable(t[7:-3]))
+        if t[7] == 0x40: # Requests
+            topic=""
+            if t[11] == 0x1d:
+                topic = " (Nominal Power)"
+            elif t[11] == 0x22:
+                topic = " (Panel Power)"
+            elif t[11] == 0x23:
+                topic = " (Panel Voltage)"
+            elif t[11] == 0x24:
+                topic = " (Panel Current)"
+            elif t[11] == 0x29:
+                topic = " (ACPower)"
+            elif t[11] == 0x3c:
+                topic = " (Daily Yield)"
+            if DEBUG:
+                print(f"# RequestA for 0x{t[11]:02x}{topic} from {t[4]}")
+        elif t[7] == 0x41: # Responses
+            if t[8] == 0x00:
+                len = (t[9] << 8 | t[10])
+                if DEBUG:
+                    print(f"# ReponseA for 0x{t[11]:02x} from {t[4]} len={len}")
+                if t[11] == 0x51: # Label Value Value Value Value byte Label Value Value Value Value byte
+                    i_labelA = 15
+                    i_valA1 = i_labelA + (t[i_labelA-2] << 8 | t[i_labelA-1])
+                    i_valA2 = i_valA1+4
+                    i_valA3 = i_valA2+4
+                    i_valA4 = i_valA3+4
+                    #print(i_labelA,t[i_labelA-2],t[i_labelA-1],i_valA1,i_valA2,i_valA3,i_valA4)
+                    i_labelB = i_valA4+4+1+2
+                    i_valB1 = i_labelB + (t[i_labelB-2] << 8 | t[i_labelB-1])
+                    i_valB2 = i_valB1+4
+                    i_valB3 = i_valB2+4
+                    i_valB4 = i_valB3+4                    
+                    #print(i_labelB,t[i_labelB-2],t[i_labelB-1],i_valB1,i_valB2,i_valB3,i_valB4)
+                    #label = t[15:15+t[14]]
+                    if DEBUG:
+                        print("#", str(t[i_labelA:i_valA1]), 
+                            decode_stecaFloat(t[i_valA1:i_valA2]), 
+                            decode_stecaFloat(t[i_valA2:i_valA3]), 
+                            decode_stecaFloat(t[i_valA3:i_valA4]), 
+                            decode_stecaFloat(t[i_valA4:i_valA4+4])) 
+                        print("#", str(t[i_labelB:i_valB1]), 
+                            decode_stecaFloat(t[i_valB1:i_valB2]), 
+                            decode_stecaFloat(t[i_valB2:i_valB3]), 
+                            decode_stecaFloat(t[i_valB3:i_valB4]), 
+                            decode_stecaFloat(t[i_valB4:i_valB4+4])) 
+                elif t[11] == 0x3c:
+                    label = "Daily Yield"
+                    val = decode_stecaFloat_a(t[12:16])
+                    results += [label, val]
+                    if DEBUG:
+                        print("#", label, val[0], val[1])                   
+                else:
+                    label = t[15:15+t[14]].decode("ascii")
+                    val = decode_stecaFloat_a(t[15+t[14]:15+t[14]+5])
+                    results += [label, val]
+                    if DEBUG:
+                        print("#", label, val[0], val[1])
+        elif t[7] == 0x64: # Requests
+            if DEBUG:
+                print(f"# RequestB for 0x{t[11]:02x} from {t[4]}")
+        elif t[7] == 0x65: # Responses
+            if DEBUG:
+                print(f"# ReponseB for 0x{t[11]:02x} from {t[4]}")
+            if t[11] == 0xF1: #  ???
+                results += ["???", format_hex_bytes(t[12:17])]
+                if DEBUG:
+                    print("# (",format_hex_bytes(t[12:17]),")")
+                    print("#", decode_stecaFloat(t[12:16]))
+            elif t[11] == 0x05: # Time
+                time = datetime.datetime(2000+t[12], t[13], t[14], t[15], t[16], t[17]) # ignoring final 3 byte for now. TZ, millis, ...?
+                results += ["Time", time]
+                if DEBUG:
+                    print(f"# {time} (",format_hex_bytes(t[12:21]),")")
+            elif t[11] == 0x08: #  ???
+                results += ["???", format_hex_bytes(t[12:17])]
+                if DEBUG:
+                    print("# (",format_hex_bytes(t[12:17]),")")
+                    print("#", decode_stecaFloat(t[12:16]))
+            elif t[11] == 0x09: # Serial
+                results += ["Serial Number", t[12:-4].decode("ascii")]
+                if DEBUG:
+                    print("# (",format_hex_bytes(t[12:17]),")")
+                    print("#", decode_stecaFloat(t[12:16]))
+            else:
+                results += ["???", format_hex_bytes(t[12:17])]
+        elif t[7] == 0x21: # Responses
+            if t[8] == 0x00:
+                len = (t[9] << 8 | t[10])
+                results += ["???", format_hex_bytes(t[12:17])]
+                if DEBUG:
+                    print("# ReponseC for", t[11], "from", t[4], "len=",len)
+        return results
     else:
         if DEBUG:
-            print("received data is incorrect")
-        return 0
+            print("# NOT a single full Steca485 Telegram")
+
+def format_hex_bytes(b):
+    formatted_hex_bytes = ''
+    for byte in b:
+        hex_byte = f'{byte:02x}'
+        formatted_hex_bytes += f'{hex_byte:>2} '
+    return formatted_hex_bytes.strip()
+
+def is_one_full_telegram(t):
+    if t[0] != 2:
+        #print("not starting w/ 0x02")
+        return False
+    if t[len(t)-1] != 3:
+        #print("not ending w/ 0x03")
+        return False
+    if len(t) != (t[2] << 8 | t[3]):
+        #print("wrong length",len(t), "!=", (t[2] << 8 | t[3]))
+        return False
+    return True
+
+  
+def getStecaGridResult(req):
+    if DEBUG:
+        results = process_steca485(req)
+        print(results)
+    with port as steca:
+        steca.write(req)
+        in_data = steca.read(size=1024)
+    results = process_steca485(in_data)
+    if DEBUG:
+        print(results)
+    if results:    
+        return results[3]
 
 if __name__ == "__main__":
     port = serial.Serial(baudrate=SERIAL_BAUDRATE, port=SERIAL_DEVICE, timeout=SERIAL_TIMEOUT, parity=SERIAL_PARITY, stopbits=SERIAL_SBIT, bytesize=SERIAL_BYTES, xonxoff=0, rtscts=0)
     if DEBUG:
         print(port.get_settings())
+   
+    ac_power = getStecaGridResult(SG_AC_POWER)
+    if ac_power:
+        print(ac_power[0])
         
-    ac_power = getStecaGridACPower()
-
-    print(ac_power)
-
     port.close()
