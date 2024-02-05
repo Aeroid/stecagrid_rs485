@@ -78,51 +78,35 @@ Verwendung auf eigne Gefahr.
 
 ### Example (Debug)
 	python3 getStecaGridData.py
-	{'baudrate': 38400, 'bytesize': 8, 'parity': 'N', 'stopbits': 1, 'xonxoff': 0, 'dsrdtr': False, 'rtscts': 0, 'timeout': 1, 'write_timeout': None, 'inter_byte_timeout': None}
-	serial write [2, 1, 0, 16, 1, 201, 101, 64, 3, 0, 1, 41, 126, 41, 190, 3]
-	ser read b'\x02\x01\x00\x1e\xc9\x01`A\x00\x00\x0f)\x00\x00\x07ACPower\x0b><\x88#fZ\x03'
-	0 2  0x02
-	1 1  0x01
-	2 0  0x00
-	3 30  0x1e
-	4 201 É 0xc9
-	5 1  0x01
-	6 96 ` 0x60
-	7 65 A 0x41
-	8 0  0x00
-	9 0  0x00
-	10 15  0x0f
-	11 41 ) 0x29
-	12 0  0x00
-	13 0  0x00
-	14 7  0x07
-	15 65 A 0x41
-	16 67 C 0x43
-	17 80 P 0x50
-	18 111 o 0x6f
-	19 119 w 0x77
-	20 101 e 0x65
-	21 114 r 0x72
-	22 11
-		   0x0b
-	23 62 > 0x3e
-	24 60 < 0x3c
-	25 136 � 0x88
-	26 35 # 0x23
-	27 102 f 0x66
-	28 90 Z 0x5a
-	29 3  0x03
-	iacpower 0x441F1E00
-	iacpower 1142889984
-	in_data[24-27] 0x3e3c88
-	AC Power: 636.46875
-	636.46875
+        {'baudrate': 38400, 'bytesize': 8, 'parity': 'N', 'stopbits': 1, 'xonxoff': 0, 'dsrdtr': False, 'rtscts': 0, 'timeout': 1, 'write_timeout': None, 'inter_byte_timeout': None}
+
+        serial write:
+        # 02 01 00 10 01 7b b5 64 03 00 01 f1 46 cc 79 03
+        # dgram: to: 1  from: 123  len: 16  crc1: b5  crc2: cc79
+        # payload: 64 03 00 01 f1 46    d....F
+        # RequestB for 0xf1 from 1
+        [1, 123, 100, 241]
+
+        serial read:
+        # 02 01 00 14 7b 01 43 65 00 00 05 f1 26 58 24 4c 34 5d 50 03
+        # dgram: to: 123  from: 1  len: 20  crc1: 43  crc2: 5d50
+        # payload: 65 00 00 05 f1 26 58 24 4c 34    e....&X$L4
+        # ReponseB for 0xf1 from 123
+        # ( 26 58 24 4c 34 )
+        # [43081880.0, 'Wh']
+        [123, 1, 101, 241, 'Total Yield', [43081880.0, 'Wh']]
+        43081880.0
 
 ### Further Requests for replay approach
 The following telegrams are request to extend the replay beyond AC Power. Note, that they all address the inverter with the RS485 ID #1. You will have to change your Steca to that ID until we have figured out the CRC generation to synthesize a full new telegram for a different id. Contact me of you need a replay telegram for a differnt ID, and I might be able to record one for you from the SEM.
 
-	SG_AC_POWER      = [0x02, 0x01, 0x00, 0x10, 0x01, 0xC9, 0x65, 0x40, 0x03, 0x00, 0x01, 0x29, 0x7E, 0x29, 0xBE, 0x03]
-	SG_NOMINAL_POWER = [0x02, 0x01, 0x00, 0x10, 0x01, 0x7b, 0xb5, 0x40, 0x03, 0x00, 0x01, 0x1d, 0x72, 0x30, 0x95, 0x03]
- 	SG_PANEL_POWER   = [0x02, 0x01, 0x00, 0x10, 0x01, 0x7b, 0xb5, 0x40, 0x03, 0x00, 0x01, 0x22, 0x77, 0x12, 0xee, 0x03]
-	SG_PANEL_VOLTAGE = [0x02, 0x01, 0x00, 0x10, 0x01, 0x7b, 0xb5, 0x40, 0x03, 0x00, 0x01, 0x23, 0x78, 0x78, 0xe4, 0x03]
-	SG_PANEL_CURRENT = [0x02, 0x01, 0x00, 0x10, 0x01, 0x7b, 0xb5, 0x40, 0x03, 0x00, 0x01, 0x24, 0x79, 0xa0, 0xb6, 0x03]
+        SG_NOMINAL_POWER = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 1d 72 30 95 03")
+        SG_PANEL_POWER   = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 22 77 12 ee 03")
+        SG_PANEL_VOLTAGE = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 23 78 78 e4 03")
+        SG_PANEL_CURRENT = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 24 79 a0 b6 03")
+        SG_VERSIONS      = bytes.fromhex("02 01 00 0c 01 7b c6 20 03 79 8c 03")
+        SG_SERIAL        = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 09 5e 85 6e 03")
+        SG_TIME          = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 05 5a 3a 44 03")
+        SG_DAILY_YIELD   = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 3c 91 e1 c9 03")
+        SG_TOTAL_YIELD   = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 f1 46 cc 79 03")
+        SG_AC_POWER      = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 29 7e 98 5b 03")
