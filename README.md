@@ -98,7 +98,7 @@ Verwendung auf eigne Gefahr.
         43081880.0
 
 ### Further Requests for replay approach
-The following telegrams are request to extend the replay beyond AC Power. Note, that they all address the inverter with the RS485 ID #1. You will have to change your Steca to that ID until we have figured out the CRC generation to synthesize a full new telegram for a different id. Contact me of you need a replay telegram for a differnt ID, and I might be able to record one for you from the SEM.
+The following telegrams are requests to extend the replay beyond AC Power. Note, that they all address the inverter with the RS485 ID #1. You will have to change your Steca to that ID until we have figured out the CRC generation to synthesize a full new telegram for a different id. Contact me of you need a replay telegram for a differnt ID, and I might be able to record one for you from the SEM.
 
         SG_NOMINAL_POWER = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 1d 72 30 95 03")
         SG_PANEL_POWER   = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 22 77 12 ee 03")
