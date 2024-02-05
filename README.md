@@ -69,15 +69,37 @@ Date/Time dialog led by StecaGridSEM #123/0x7d with Inverter #1
 
 Simple bare metal RS485 proof of concept code that requests ACPower via RS485 and outputs plain float value (Watts).
 
-### install
+### Install
     pip3 install pyserial
+
+### Usage
+        usage: getStecaGridData.py [-h] [-v] [-u] [-s SERIAL] [-np] [-pp] [-pv] [-pc] [-ve] [-sn] [-ti] [-dy] [-ty] [-ap]
+
+        Read data via RS485 from StecaGrid3600
+
+        optional arguments:
+          -h, --help            show this help message and exit
+          -v, --verbose         Enable verbose output
+          -u, --unit            output unit of measurement
+          -s SERIAL, --serial SERIAL
+                                Serial interface for RS485 communication (default /dev/ttyS0)
+          -np, --nominal_power  request nominal_power
+          -pp, --panel_power    request panel_power
+          -pv, --panel_voltage  request panel_voltage
+          -pc, --panel_current  request panel_current
+          -ve, --versions       request versions
+          -sn, --serialnumber   request serial number
+          -ti, --time           request time
+          -dy, --daily_yield    request daily_yield
+          -ty, --total_yield    request total_yield
+          -ap, --ac_power       request ac_power
 
 ### Orginal Disclaimer
 Ich übernehme keine Garantie oder Gewährleistung für die Nutzung dieser Software-
 Verwendung auf eigne Gefahr.
 
 ### Example (Debug)
-	python3 getStecaGridData.py
+        python3 getStecaGridData.py -v -u --total_yield
         {'baudrate': 38400, 'bytesize': 8, 'parity': 'N', 'stopbits': 1, 'xonxoff': 0, 'dsrdtr': False, 'rtscts': 0, 'timeout': 1, 'write_timeout': None, 'inter_byte_timeout': None}
 
         serial write:
@@ -88,14 +110,14 @@ Verwendung auf eigne Gefahr.
         [1, 123, 100, 241]
 
         serial read:
-        # 02 01 00 14 7b 01 43 65 00 00 05 f1 26 58 24 4c 34 5d 50 03
-        # dgram: to: 123  from: 1  len: 20  crc1: 43  crc2: 5d50
-        # payload: 65 00 00 05 f1 26 58 24 4c 34    e....&X$L4
+        # 02 01 00 14 7b 01 43 65 00 00 05 f1 7c 58 24 4c 8a 1b ef 03
+        # dgram: to: 123  from: 1  len: 20  crc1: 43  crc2: 1bef
+        # payload: 65 00 00 05 f1 7c 58 24 4c 8a    e....|X$L.
         # ReponseB for 0xf1 from 123
-        # ( 26 58 24 4c 34 )
-        # [43081880.0, 'Wh']
-        [123, 1, 101, 241, 'Total Yield', [43081880.0, 'Wh']]
-        43081880.0
+        # ( 7c 58 24 4c 8a )
+        # [43082224.0, 'Wh']
+        [123, 1, 101, 241, 'Total Yield', [43082224.0, 'Wh']]
+        43082224.0 Wh
 
 ### Further Requests for replay approach
 The following telegrams are requests to extend the replay beyond AC Power. Note, that they all address the inverter with the RS485 ID #1. You will have to change your Steca to that ID until we have figured out the CRC generation to synthesize a full new telegram for a different id. Contact me of you need a replay telegram for a differnt ID, and I might be able to record one for you from the SEM.
