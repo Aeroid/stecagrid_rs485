@@ -2,14 +2,14 @@
 
 ## The protocol
 
-As far as I can tell its a s simple request and response protocol taht Steca had implemented to talk to StecaGrid inverters (around 2013 time frame). Newer models seem to have a better XML API.
+As far as I can tell its a s simple request and response protocol that Steca had implemented to talk to StecaGrid inverters (around 2013 time frame). Newer models seem to have a better XML API.
 - A dynamic datagram structure is used, which starts with 0x02 and ends with 0x03.
 - The second data word holds the overall length of the datagram.
-- Following that the RS485 id of the recipent and of the sender are always present.
+- Following that the RS485 id of the recipient and of the sender are always present.
 - The next byte (as well as the last word before 0x03) are obviously some CRC.
 - The rest (payload) of the datagram depends on the topic and if its the request or response for it
 - It typically has a header (requests start with 0x40, 0x64, 0x20, ... responses start with 0x41, 0x65, 0x21, ... respectively)
-- The topics are represented in th fifth byte of the payload of both the request and the reponse. A few of the discovered topics are:
+- The topics are represented in the fifth byte of the payload of both the request and the reponse. A few of the discovered topics are:
   - Grid voltage = L1 MeasurementValues ENS1 (measurement 1/2, value 1/4)
   - Grid power = AC Power (0x29)
   - Grid frequency = L1 MeasurementValues ENS1 (measurement 2/2, value 2/4)
@@ -32,7 +32,7 @@ As far as I can tell its a s simple request and response protocol taht Steca had
 
 ### Examples 
 
-StecaRS485protocol.py can used to explore, discover and decode the datagrams via an RS485 interface. Plenty of recorded data is part of it for replay.
+StecaRS485protocol.py can be used to explore, discover and decode the datagrams via an RS485 interface. Plenty of recorded data is part of it for replay.
 
 Daily Yield dialog led by StecaGridSEM #123/0x7d with Inverter #1
 
