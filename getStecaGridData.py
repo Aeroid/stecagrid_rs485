@@ -19,16 +19,17 @@ SERIAL_TIMEOUT  = 1
 #  02 01 00 1F C9 01 84 41 00 00 10 29 00 00 08 41 43 50 6F 77 65 72 3A 0B A2 78 85 FB 49 4C 03
 
 # Recorded packets of StecaGrid SEM (id #123/0x7b) talking to StecaGrid 3600 (id #1) for replay
+SG_VERSIONS      = bytes.fromhex("02 01 00 0c 01 7b c6 20 03 79 8c 03")
 SG_NOMINAL_POWER = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 1d 72 30 95 03")
 SG_PANEL_POWER   = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 22 77 12 ee 03")
 SG_PANEL_VOLTAGE = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 23 78 78 e4 03")
 SG_PANEL_CURRENT = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 24 79 a0 b6 03")
-SG_VERSIONS      = bytes.fromhex("02 01 00 0c 01 7b c6 20 03 79 8c 03")
-SG_SERIAL        = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 09 5e 85 6e 03")
-SG_TIME          = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 05 5a 3a 44 03")
-SG_DAILY_YIELD   = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 3c 91 e1 c9 03")
-SG_TOTAL_YIELD   = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 f1 46 cc 79 03")
 SG_AC_POWER      = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 29 7e 98 5b 03")
+SG_DAILY_YIELD   = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 3c 91 e1 c9 03")
+SG_TIME          = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 05 5a 3a 44 03")
+SG_MYSTERY_ONE   = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 08 5d 02 a9 03")
+SG_SERIAL        = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 09 5e 85 6e 03")
+SG_TOTAL_YIELD   = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 f1 46 cc 79 03")
  
 # klaute's original packet, different SEM ID
 #SG_AC_POWER      = bytes.fromhex("02 01 00 10 01 C9 65 40 03 00 01 29 7E 29 BE 03") 
@@ -68,6 +69,35 @@ def decode_TotalYield_a(ba):
     bits = ba[3] << 24 | ba[2] << 16 | ba[1] << 8 | ba[0]
     ieee , = struct.unpack('f', struct.pack('I', bits))
     return [ieee, "Wh"]
+    
+def decode_version(b):
+    o = b'SSXSNSSNSSNSSNSSNSSNSSNSSNSSNSSNSSNSSNSSNSSNSSNSSNSSNSSSSSSSSSSSS'
+    so = []
+    aos = []
+    for i in range(len(b)):
+        if o[len(aos)] == 83 and b[i] == 0:
+            aos.append(''.join(so))
+            so = []
+        elif o[len(aos)] == 78 and len(so)>6:
+            aos.append('.'.join(so[2:5]))
+            so = []
+        elif o[len(aos)] == 88 and len(so)>1:
+            aos.append('')
+            so = []
+
+        if o[len(aos)] == 83:
+            so.append(chr(b[i]))
+        elif o[len(aos)] == 78 or o[len(aos)] == 88:
+            so.append(str(b[i]))
+
+    s = ""
+    for i in range(len(aos)):
+        s += aos[i]
+        if i<3 or (i-4)%3 == 1:
+            s += '\n'
+        else:
+            s += '\t'
+    return s
 
 def process_steca485(t):
     """
@@ -177,18 +207,17 @@ def process_steca485(t):
                 results += ["???", [format_hex_bytes(t[12:17]),""]]
                 if DEBUG:
                     print("# (",format_hex_bytes(t[12:17]),")")
-                    print("#", decode_stecaFloat(t[12:16]))
             elif t[11] == 0x09: # 9: Serial
                 results += ["Serial Number", [t[12:-4].decode("ascii"),""]]
                 if DEBUG:
                     print("# (",format_hex_bytes(t[12:17]),")")
-                    print("#", decode_stecaFloat(t[12:16]))
             else:
                 results += ["???", [format_hex_bytes(t[12:17]),""]]
-        elif t[7] == 0x21: # Responses 
+        elif t[7] == 0x21: # 33: Version
             if t[8] == 0x00:
                 len = (t[9] << 8 | t[10])
-                results += ["???", [format_hex_bytes(t[12:17]),""]]
+                results += ["???", [decode_version(t[11:-3]),""]]
+                print()
                 if DEBUG:
                     print("# ReponseC for", t[11], "from", t[4], "len=",len)
         return results
@@ -211,6 +240,7 @@ def format_printable(b):
         else:
             printable += chr(byte)
     return printable
+    
 def is_one_full_telegram(t):
     if t[0] != 2:
         #print("not starting w/ 0x02")
@@ -222,7 +252,6 @@ def is_one_full_telegram(t):
         #print("wrong length",len(t), "!=", (t[2] << 8 | t[3]))
         return False
     return True
-
   
 def getStecaGridResult(req):
     if DEBUG:
@@ -250,14 +279,16 @@ if __name__ == "__main__":
     parser.add_argument('-pv', '--panel_voltage' , action='store_true', help='request panel_voltage')
     parser.add_argument('-pc', '--panel_current' , action='store_true', help='request panel_current')
     parser.add_argument('-ve', '--versions'      , action='store_true', help='request versions'     )
-    parser.add_argument('-sn', '--serialnumber'  , action='store_true', help='request serial number')
+    parser.add_argument('-sn', '--serial_number' , action='store_true', help='request serial number')
     parser.add_argument('-ti', '--time'          , action='store_true', help='request time'         )
     parser.add_argument('-dy', '--daily_yield'   , action='store_true', help='request daily_yield'  )
     parser.add_argument('-ty', '--total_yield'   , action='store_true', help='request total_yield'  )
     parser.add_argument('-ap', '--ac_power'      , action='store_true', help='request ac_power'     )
+    parser.add_argument('-m1', '--mystery_one'   , action='store_true', help='request unknown data' )
+    
     args = parser.parse_args()
     DEBUG = args.verbose
-    uof = args.unit
+    uom = args.unit
     ser = SERIAL_DEVICE
     if args.serial:
         ser = args.serial
@@ -272,7 +303,7 @@ if __name__ == "__main__":
         reqval=SG_PANEL_CURRENT
     if args.versions:      
         reqval=SG_VERSIONS     
-    if args.serialnumber:        
+    if args.serial_number:        
         reqval=SG_SERIAL       
     if args.time:          
         reqval=SG_TIME         
@@ -281,7 +312,9 @@ if __name__ == "__main__":
     if args.total_yield:   
         reqval=SG_TOTAL_YIELD  
     if args.ac_power:      
-        reqval=SG_AC_POWER     
+        reqval=SG_AC_POWER
+    if args.mystery_one:      
+        reqval=SG_MYSTERY_ONE        
 
     port = serial.Serial(baudrate=SERIAL_BAUDRATE, port=ser, timeout=SERIAL_TIMEOUT, parity=SERIAL_PARITY, stopbits=SERIAL_SBIT, bytesize=SERIAL_BYTES, xonxoff=0, rtscts=0)
     if DEBUG:
@@ -289,9 +322,10 @@ if __name__ == "__main__":
    
     value = getStecaGridResult(reqval)
     if value:
-        if uof:
+        if uom:
             print(value[0], value[1])
         else:
             print(value[0])
         
     port.close()
+
