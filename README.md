@@ -132,3 +132,30 @@ The following telegrams are requests to extend the replay beyond AC Power. Note,
         SG_DAILY_YIELD   = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 3c 91 e1 c9 03")
         SG_TOTAL_YIELD   = bytes.fromhex("02 01 00 10 01 7b b5 64 03 00 01 f1 46 cc 79 03")
         SG_AC_POWER      = bytes.fromhex("02 01 00 10 01 7b b5 40 03 00 01 29 7e 98 5b 03")
+
+### Based on versions
+All of my tinkering is based on the following firmware versions. You milage may vary.
+
+		python3 getStecaGridData.py -ve
+
+		StecaGrid 3600
+
+		HMI BFAPI       5.0.0   19.03.2013 14:38:59
+		HMI FBL         2.0.3   05.04.2013 11:46:20
+		HMI APP         15.0.0  26.07.2013 13:19:06
+		HMI PAR         0.0.1   26.07.2013 13:19:06
+		HMI OEM         0.0.1   11.06.2013 08:11:29
+		PU BFAPI        5.0.0   19.03.2013_14:38:42
+		PU FBL  1.0.1   19.12.2012_16:36:04
+		PU APP  4.0.0   03.05.2013_09:37:55
+		PU PAR  3.0.0   31.01.2013_13:47:24
+		ENS1 BFAPI      5.0.0   19.03.2013_14:38:51
+		ENS1 FBL        1.0.1   19.12.2012_16:34:47
+		ENS1 APP        39.0.0  11.07.2013_14:39:50
+		ENS1 PAR        0.0.14  11.07.2013_14:40:03
+		ENS2 BFAPI      5.0.0   19.03.2013_14:38:51
+		ENS2 FBL        1.0.1   19.12.2012_16:34:47
+		ENS2 APP        39.0.0  11.07.2013_14:39:50
+		ENS2 PAR        0.0.14  11.07.2013_14:40:03
+		HMI     PU      ENS2
+		Net11
