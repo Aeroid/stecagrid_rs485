@@ -48,16 +48,6 @@ _M_PING      = [0x39b2, 0x7364, 0xe6c8, 0x78cd, 0xf19a, 0x5669, 0xacd2, 0x0000]
 _BASE_PING   = 0xf6e5
 _OFF_PING_7b = 0xb6db
 
-_T_REF   = 0x05
-_C_REF   = 0x8ba1
-_M_REQ16 = [
-    0x87c7, 0x72a3, 0x2d36, 0x5a6c, 0xb4d8, 0xdced, 0x0c87, 0x190e,
-    0x0000, 0x0000, 0xc870, 0x25bd, 0x4b7a, 0x96f4, 0x98b5, 0x8437,
-]
-_OFF_40 = 0x572c
-_OFF_68 = 0xeef5  # verified: 3/3 captured frames (topics 0x09, 0x5a, 0x5b)
-_OFF_7b = 0xb1e5
-
 def calc_crc2_ping(to_id: int, sem_id: int = SEM_ID) -> int:
     crc2 = _BASE_PING
     for bit in range(8):
@@ -66,18 +56,20 @@ def calc_crc2_ping(to_id: int, sem_id: int = SEM_ID) -> int:
     elif sem_id != 0xc9: raise ValueError(f"unsupported SEM ID 0x{sem_id:02x}")
     return crc2
 
-def calc_crc2_req16(topic: int, cmd: int, sem_id: int = SEM_ID) -> int:
-    chk_ref = (_T_REF + 0x55) & 0xFF
-    chk     = (topic  + 0x55) & 0xFF
-    crc2    = _C_REF
-    for bit in range(8):
-        if ((topic ^ _T_REF) >> bit) & 1: crc2 ^= _M_REQ16[bit]
-        if ((chk ^ chk_ref) >> bit) & 1:  crc2 ^= _M_REQ16[8 + bit]
-    if cmd == 0x40: crc2 ^= _OFF_40
-    if cmd == 0x68: crc2 ^= _OFF_68
-    if   sem_id == 0x7b: crc2 ^= _OFF_7b
-    elif sem_id != 0xc9: raise ValueError(f"unsupported SEM ID 0x{sem_id:02x}")
-    return crc2
+CRC8_OFFSET = 0x55
+CRC16_OFFSET = 0x5555
+CRC16_TABLE = [
+    0x0000, 0xACAC, 0xEC05, 0x40A9, 0x6D57, 0xC1FB, 0x8152, 0x2DFE,
+    0xDAAE, 0x7602, 0x36AB, 0x9A07, 0xB7F9, 0x1B55, 0x5BFC, 0xF750,
+]
+
+def calc_crc2_req16(data: bytes) -> int:
+    crc2 = CRC16_OFFSET
+    for value in data:
+        crc2 ^= value
+        crc2 = (crc2 >> 4) ^ CRC16_TABLE[crc2 & 0x000F]
+        crc2 = (crc2 >> 4) ^ CRC16_TABLE[crc2 & 0x000F]
+    return crc2 & 0xFFFF
 
 # ── Frame builders ────────────────────────────────────────────────────────────
 def build_ping(to_id: int, sem_id: int = SEM_ID) -> bytes:
@@ -88,15 +80,23 @@ def build_ping(to_id: int, sem_id: int = SEM_ID) -> bytes:
     return h + bytes([crc1, 0x20, 0x03, crc2 >> 8, crc2 & 0xFF, 0x03])
 
 def build_request16(to_id: int, topic: int, cmd: int,
-                    sem_id: int = SEM_ID) -> bytes:
-    """16-byte data-request frame.
-    CRC2 solved for cmd=0x40 (RequestA), 0x64 (RequestB), 0x68 (RequestC)."""
-    h    = bytes([0x02, 0x01, 0x00, 0x10, to_id, sem_id])
-    crc1 = calc_crc1(h)
-    crc2 = calc_crc2_req16(topic, cmd, sem_id) if cmd in (0x40, 0x64, 0x68) else 0x0000
-    chk  = (topic + 0x55) & 0xFF
-    return h + bytes([crc1, cmd, 0x03, 0x00, 0x01, topic, chk,
-                      crc2 >> 8, crc2 & 0xFF, 0x03])
+                    from_id: int = SEM_ID) -> bytes:
+    """16-byte data-request frame."""
+    frame_start = bytes([0x02, 0x01])
+    frame_end = 0x03
+    frame_length = 16  # number of bytes in the frame
+    auth_code = 0x03   # probably service level (e.g. user / operator / manufacturer)
+    payload_length = 1 # number bytes in the request (only 'cmd' byte)
+
+    header = frame_start + frame_length.to_bytes(2, "big") + bytes([to_id, from_id])
+    crc1 = calc_crc1(header)
+    checksum = (CRC8_OFFSET + topic) & 0xFF
+    fragment = (header
+                + bytes([crc1, cmd, auth_code])
+                + bytes(payload_length.to_bytes(2, "big"))
+                + bytes([topic, checksum]))
+    crc2 = calc_crc2_req16(fragment + bytes([frame_end]))
+    return fragment + bytes([crc2 >> 8, crc2 & 0xFF, frame_end])
 
 # ── Pre-built frames for inverter ID 0x01, SEM 0x7b (synthesized) ─────────────
 SG_VERSIONS      = build_ping(0x01)
@@ -376,6 +376,8 @@ def process_steca485(t):
 def getStecaGridResult(port, req, timeout_s=2.0, retries=3):
     """Send req, read response, return results[5] (the value field).
     Retries on error/busy responses from the inverter (shared bus)."""
+    if DEBUG:
+        print("# request:", format_hex_bytes(req))
     for attempt in range(retries):
         if DEBUG and attempt > 0:
             print(f"# retry {attempt}")
