@@ -63,6 +63,8 @@ LEN = total frame length including STX (0x02) and ETX (0x03)
 | `0x51` | GridMeasurements | `0x40` / `0x41` | ENS1+ENS2 label + 4× Steca float |
 | `0x5a` | EventLog page 1 | `0x68` / `0x69` | Event entries (large frame, ~860 B) |
 | `0x5b` | EventLog page 2 | `0x68` / `0x69` | Event entries (recent / oldest) |
+| `0xe0` | MonthlyYield | `0x64` / `0x65` | List of 12x IEEE 754 float LE, Wh |
+| `0xef` | YearlyYield | `0x64` / `0x65` | List of 30x IEEE 754 float LE, Wh |
 | `0xf1` | TotalYield | `0x64` / `0x65` | IEEE 754 float LE, Wh |
 
 ### Data Encoding
@@ -73,7 +75,7 @@ value, = struct.unpack('f', struct.pack('I', iacpower & 0xFFFFFFFF))
 ```
 Unit byte: `0x05`=V, `0x07`=A, `0x09`=Wh, `0x0B`=W, `0x0D`=Hz, `0x00`=NUL
 
-**Total Yield** (4 bytes little-endian IEEE 754 float, Wh):
+**Monthly / Yearly / Total Yield** (4 bytes little-endian IEEE 754 float, Wh):
 ```python
 bits = b[3]<<24 | b[2]<<16 | b[1]<<8 | b[0]
 value, = struct.unpack('f', struct.pack('I', bits))

@@ -106,12 +106,14 @@ SG_PANEL_VOLTAGE = build_request16(0x01, 0x23, 0x40)
 SG_PANEL_CURRENT = build_request16(0x01, 0x24, 0x40)
 SG_AC_POWER      = build_request16(0x01, 0x29, 0x40)
 SG_DAILY_YIELD   = build_request16(0x01, 0x3c, 0x40)
-SG_GRID_MEAS      = build_request16(0x01, 0x51, 0x40)
-SG_EVENT_LOG_P1   = build_request16(0x01, 0x5a, 0x68)
-SG_EVENT_LOG_P2   = build_request16(0x01, 0x5b, 0x68)
-SG_TIME           = build_request16(0x01, 0x05, 0x64)
+SG_GRID_MEAS     = build_request16(0x01, 0x51, 0x40)
+SG_EVENT_LOG_P1  = build_request16(0x01, 0x5a, 0x68)
+SG_EVENT_LOG_P2  = build_request16(0x01, 0x5b, 0x68)
+SG_TIME          = build_request16(0x01, 0x05, 0x64)
 SG_MYSTERY_ONE   = build_request16(0x01, 0x08, 0x64)
 SG_SERIAL        = build_request16(0x01, 0x09, 0x64)
+SG_MONTHLY_YIELD = build_request16(0x01, 0xe0, 0x64)
+SG_YEARLY_YIELD  = build_request16(0x01, 0xef, 0x64)
 SG_TOTAL_YIELD   = build_request16(0x01, 0xf1, 0x64)
 
 # ── Value decoders ────────────────────────────────────────────────────────────
@@ -126,10 +128,13 @@ def decode_stecaFloat_a(ac_bytes):
         print("# f:", facpower)
     return [facpower, unit]
 
-def decode_TotalYield_a(ba):
+def decode_yield_a(ba):
     bits = ba[3] << 24 | ba[2] << 16 | ba[1] << 8 | ba[0]
     ieee, = struct.unpack('f', struct.pack('I', bits))
     return [ieee, "Wh"]
+
+def decode_yields_a(t, offset):
+    return list(decode_yield_a(t[pos:pos+4]) for pos in range(offset, len(t)-4, 4))
 
 def decode_grid_meas(t):
     """Decode GridMeasurements response (topic=0x51, ResponseA).
@@ -310,7 +315,7 @@ def process_steca485(t):
                 results += ["Grid Measurements", groups]
                 if DEBUG:
                     for label, vals in groups:
-                        print(f"#  {label}:", ", ".join(f"{v[0]:.2f} {v[1]}" for v in vals))
+                        print(f"#  {label}", ", ".join(f"{v[0]:.2f} {v[1]}" for v in vals))
             elif t[11] == 0x3c:
                 val = decode_stecaFloat_a(t[12:16])
                 results += ["Daily Yield", val]
@@ -325,14 +330,25 @@ def process_steca485(t):
 
     elif t[7] == 0x64:  # RequestB
         if DEBUG:
-            topics = {0x05:"Time", 0x08:"Mystery_08", 0x09:"Serial", 0xf1:"Total Yield"}
+            topics = {0x05:"Time", 0x08:"Mystery_08", 0x09:"Serial",
+                      0xe0:"Monthly Yield", 0xef:"Yearly Yield", 0xf1:"Total Yield"}
             print(f"# RequestB for 0x{t[11]:02x} ({topics.get(t[11], '?')}) from {t[4]}")
 
     elif t[7] == 0x65:  # ResponseB
         if DEBUG:
             print(f"# ResponseB for 0x{t[11]:02x} from {t[4]}")
-        if t[11] == 0xf1:
-            val = decode_TotalYield_a(t[12:16])
+        if t[11] == 0xe0:
+            val = decode_yields_a(t, 12)
+            results += ["Monthly Yield", val]
+            if DEBUG:
+                print("#", val)
+        elif t[11] == 0xef:
+            val = decode_yields_a(t, 12)
+            results += ["Yearly Yield", val]
+            if DEBUG:
+                print("#", val)
+        elif t[11] == 0xf1:
+            val = decode_yield_a(t[12:16])
             results += ["Total Yield", val]
             if DEBUG:
                 print("#", val)
@@ -456,7 +472,10 @@ if __name__ == "__main__":
     parser.add_argument('-gm', '--grid_meas',     action='store_true', help='Request grid measurements (ENS1+ENS2)')
     parser.add_argument('-el', '--event_log',     action='store_true', help='Request event log (both pages)')
     parser.add_argument('-dy', '--daily_yield',   action='store_true', help='Request daily yield')
+    parser.add_argument('-my', '--monthly_yield', action='store_true', help='Request monthly yield')
+    parser.add_argument('-yy', '--yearly_yield',  action='store_true', help='Request yearly yield')
     parser.add_argument('-ty', '--total_yield',   action='store_true', help='Request total yield')
+    parser.add_argument('-ay', '--all_yields',    action='store_true', help='Used with --monthly_yield or --yearly_yield: Provide all yields')
     parser.add_argument('-ti', '--time',          action='store_true', help='Request inverter time')
     parser.add_argument('-sn', '--serial_number', action='store_true', help='Request serial number')
     parser.add_argument('-ve', '--versions',      action='store_true', help='Request firmware versions')
@@ -513,6 +532,8 @@ if __name__ == "__main__":
     elif args.ac_power:      reqval = build_request16(inv_id, 0x29, 0x40)
     elif args.grid_meas:     reqval = build_request16(inv_id, 0x51, 0x40)
     elif args.daily_yield:   reqval = build_request16(inv_id, 0x3c, 0x40)
+    elif args.monthly_yield: reqval = build_request16(inv_id, 0xe0, 0x64)
+    elif args.yearly_yield:  reqval = build_request16(inv_id, 0xef, 0x64)
     elif args.total_yield:   reqval = build_request16(inv_id, 0xf1, 0x64)
     elif args.time:          reqval = build_request16(inv_id, 0x05, 0x64)
     elif args.serial_number: reqval = build_request16(inv_id, 0x09, 0x64)
@@ -521,15 +542,24 @@ if __name__ == "__main__":
     else:                    reqval = build_request16(inv_id, 0xf1, 0x64)  # default: total yield
 
     value = getStecaGridResult(port, reqval)
+    port.close()
 
     if value is not None:
+        def format_vals(vals):
+            return "  ".join(
+                f"{v[0]:.2f} {v[1]}" if uom else f"{v[0]:.2f}"
+                for v in vals)
+
+        if (args.monthly_yield or args.yearly_yield) and isinstance(value, list) and value and isinstance(value[0], list):
+            if args.all_yields:
+                value = format_vals(value)
+            else:
+                value = next((v for v in reversed(value) if v[0] != 0), value[0])
+
         if args.grid_meas and isinstance(value, list) and value and isinstance(value[0], tuple):
             for label, vals in value:
-                vals_str = "  ".join(
-                    f"{v[0]:.2f} {v[1]}" if uom else f"{v[0]:.2f}"
-                    for v in vals
-                )
-                print(f"{label}: {vals_str}")
+                vals_str = format_vals(vals)
+                print(f"{label} {vals_str}")
         elif isinstance(value, list) and len(value) == 2:
             if uom:
                 print(value[0], value[1])
@@ -537,5 +567,3 @@ if __name__ == "__main__":
                 print(value[0])
         else:
             print(value)
-
-    port.close()
