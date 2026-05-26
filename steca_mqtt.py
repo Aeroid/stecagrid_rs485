@@ -7,17 +7,27 @@ a setpoint topic so a home-automation controller can throttle output power.
 
 Power-limit flow
 ----------------
-  Subscribe : <base_topic>/setpoint/power_limit_percent
-  Publish   : <base_topic>/<METRIC_NAME>
+  Subscribe : <base_topic>/setpoint/power_limit_percent   (float 0.0–100.0)
+  State     : <base_topic>/setpoint/power_limit_percent/state
+  Metrics   : <base_topic>/<METRIC_NAME>
 
-The setpoint value (float, 0.0–100.0) is applied in the main poll loop via
-build_setpoint_percent().  A setpoint frame is only sent when the limit is
-strictly less than 100 %, so normal, unthrottled operation adds no write
-traffic to the RS485 bus.  The inverter discards the setpoint after ~1 min, so
-the loop must re-send it every poll cycle for as long as the limit is active.
+Setpoint behaviour
+------------------
+- < 100 %: frame is re-sent every poll cycle because the inverter resets its
+  setpoint after ~1 min.  Sending continues until a new value arrives.
+- = 100 %: frame is sent once and repeated only until the inverter ACKs it
+  (status Ok).  After that no further write traffic is produced.
+
+Home Assistant MQTT autodiscovery
+----------------------------------
+Enable with  ha_discovery: true  in config.yaml.  Sensor and number (setpoint)
+entities are announced under  <ha_discovery_prefix>/sensor/  and
+<ha_discovery_prefix>/number/  with retain=True on every MQTT connect.
 """
 
 import argparse
+import json
+import re
 import threading
 import time
 
@@ -26,12 +36,12 @@ import yaml             # pip install pyyaml
 import paho.mqtt.client as mqtt  # pip install paho-mqtt
 
 from StecaGridController import (
-    DEBUG,
     SERIAL_BAUDRATE, SERIAL_BYTES, SERIAL_PARITY, SERIAL_SBIT,
     TOPICS,
     build_request,
     getStecaGridResult,
-    decode_TotalYield_a,
+    read_complete_frame,
+    process_steca485,
 )
 from steca_setpoint import build_setpoint_percent
 
@@ -39,19 +49,16 @@ _DEFAULT_CONFIG = "config.yaml"
 
 # ── Metric definitions ────────────────────────────────────────────────────────
 # name → (topic_key in TOPICS dict, result-extractor)
-# extractor(val) receives results[5] from getStecaGridResult; returns (float|str, str)
+# extractor(val) receives results[5] from getStecaGridResult; returns (value, unit_str)
+# value may be float or str; unit_str is for logging only.
 def _float_unit(val):
     if isinstance(val, list) and len(val) >= 2:
         return val[0], val[1]
     return None, None
 
-def _total_yield(val):
-    # results[5] is already [float, "Wh"] from decode_TotalYield_a
-    return _float_unit(val)
-
 METRICS = {
     "CURRENT_ELECTRICITY_DELIVERY": ("ac_power",      _float_unit),
-    "ELECTRICITY_EXPORTED_TOTAL":   ("total_yield",    _total_yield),
+    "ELECTRICITY_EXPORTED_TOTAL":   ("total_yield",    _float_unit),
     "CURRENT_DAILY_YIELD":          ("daily_yield",    _float_unit),
     "CURRENT_PANEL_POWER":          ("panel_power",    _float_unit),
     "CURRENT_PANEL_VOLTAGE":        ("panel_voltage",  _float_unit),
@@ -59,14 +66,33 @@ METRICS = {
     "SG_SERIAL":                    ("serial",         lambda v: (v[0] if isinstance(v, list) else v, "")),
 }
 
+# ── Home Assistant autodiscovery metadata ─────────────────────────────────────
+# name → (friendly_name, device_class, unit_of_measurement, state_class)
+# device_class / unit / state_class may be None for string-value entities.
+_HA_SENSOR_META = {
+    "CURRENT_ELECTRICITY_DELIVERY": ("AC Power",      "power",   "W",  "measurement"),
+    "ELECTRICITY_EXPORTED_TOTAL":   ("Total Yield",   "energy",  "Wh", "total_increasing"),
+    "CURRENT_DAILY_YIELD":          ("Daily Yield",   "energy",  "Wh", "total_increasing"),
+    "CURRENT_PANEL_POWER":          ("Panel Power",   "power",   "W",  "measurement"),
+    "CURRENT_PANEL_VOLTAGE":        ("Panel Voltage", "voltage", "V",  "measurement"),
+    "CURRENT_PANEL_CURRENT":        ("Panel Current", "current", "A",  "measurement"),
+    "SG_SERIAL":                    ("Serial Number", None,      None, None),
+}
+
+
+def _node_id(base_topic: str) -> str:
+    """Derive a safe HA node_id from the MQTT base topic."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", base_topic)
+
 
 class StecaMqttService:
     def __init__(self, config: dict, verbose: bool = False):
         self._cfg     = config
         self._verbose = verbose
 
-        # Active power-limit setpoint in percent (None = not set / full power)
-        self._limit_pct: float | None = None
+        # Setpoint state (protected by _limit_lock)
+        self._limit_pct: float | None = None   # desired setpoint; None = not set
+        self._limit_confirmed = False           # True once inverter ACKed current value
         self._limit_lock = threading.Lock()
 
         # Serial port (opened in run())
@@ -84,14 +110,18 @@ class StecaMqttService:
 
     # ── MQTT callbacks ────────────────────────────────────────────────────────
     def _on_connect(self, client, userdata, flags, reason_code, properties):
-        if reason_code == 0:
-            base  = self._cfg["topic"]
-            topic = f"{base}/setpoint/power_limit_percent"
-            client.subscribe(topic, qos=1)
-            if self._verbose:
-                print(f"MQTT connected, subscribed to {topic}")
-        else:
+        if reason_code != 0:
             print(f"MQTT connect failed: reason={reason_code}")
+            return
+
+        base  = self._cfg["topic"]
+        topic = f"{base}/setpoint/power_limit_percent"
+        client.subscribe(topic, qos=1)
+        if self._verbose:
+            print(f"MQTT connected, subscribed to {topic}")
+
+        if self._cfg.get("ha_discovery", False):
+            self._publish_ha_discovery()
 
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
         if self._verbose:
@@ -105,11 +135,71 @@ class StecaMqttService:
                 print(f"MQTT setpoint out of range: {pct}")
                 return
             with self._limit_lock:
-                self._limit_pct = pct
+                self._limit_pct       = pct
+                self._limit_confirmed = False   # new value must be (re-)sent
+            # Echo current setpoint to state topic so HA reflects it immediately
+            state_topic = f"{self._cfg['topic']}/setpoint/power_limit_percent/state"
+            self._mqtt.publish(state_topic, payload=pct, qos=0, retain=True)
             if self._verbose:
                 print(f"MQTT setpoint received: {pct:.1f} %")
         except ValueError:
             print(f"MQTT setpoint invalid payload: {message.payload!r}")
+
+    # ── Home Assistant autodiscovery ──────────────────────────────────────────
+    def _publish_ha_discovery(self):
+        base    = self._cfg["topic"]
+        prefix  = self._cfg.get("ha_discovery_prefix", "homeassistant")
+        devname = self._cfg.get("ha_device_name", "StecaGrid 3600")
+        node    = _node_id(base)
+
+        device = {
+            "identifiers": [node],
+            "name":         devname,
+            "model":        "StecaGrid 3600",
+            "manufacturer": "Steca",
+        }
+
+        for metric, (fname, dclass, unit, sclass) in _HA_SENSOR_META.items():
+            cfg: dict = {
+                "name":        fname,
+                "state_topic": f"{base}/{metric}",
+                "unique_id":   f"{node}_{metric}",
+                "device":      device,
+            }
+            if dclass:
+                cfg["device_class"] = dclass
+            if unit:
+                cfg["unit_of_measurement"] = unit
+            if sclass:
+                cfg["state_class"] = sclass
+
+            disc_topic = f"{prefix}/sensor/{node}/{metric}/config"
+            self._mqtt.publish(disc_topic,
+                               payload=json.dumps(cfg), qos=1, retain=True)
+            if self._verbose:
+                print(f"HA discovery → {disc_topic}")
+
+        # Number entity for power-limit setpoint
+        setpoint_cmd   = f"{base}/setpoint/power_limit_percent"
+        setpoint_state = f"{setpoint_cmd}/state"
+        num_cfg = {
+            "name":                "Power Limit",
+            "command_topic":       setpoint_cmd,
+            "state_topic":         setpoint_state,
+            "min":                 0,
+            "max":                 100,
+            "step":                1,
+            "unit_of_measurement": "%",
+            "icon":                "mdi:solar-power",
+            "unique_id":           f"{node}_power_limit_percent",
+            "device":              device,
+            "optimistic":          False,
+        }
+        disc_topic = f"{prefix}/number/{node}/power_limit_percent/config"
+        self._mqtt.publish(disc_topic,
+                           payload=json.dumps(num_cfg), qos=1, retain=True)
+        if self._verbose:
+            print(f"HA discovery → {disc_topic}")
 
     # ── Serial helpers ────────────────────────────────────────────────────────
     def _open_port(self) -> serial.Serial:
@@ -126,23 +216,49 @@ class StecaMqttService:
         req = build_request(0x01, topic_byte, cmd_byte)
         return getStecaGridResult(self._port, req)
 
-    # ── Setpoint sender ───────────────────────────────────────────────────────
-    def _send_setpoint_if_limited(self):
-        """Send active-power setpoint when a sub-100 % limit is active."""
-        with self._limit_lock:
-            pct = self._limit_pct
-
-        if pct is None or pct >= 100.0:
-            return
-
+    # ── Setpoint logic ────────────────────────────────────────────────────────
+    def _send_setpoint(self, pct: float) -> bool:
+        """Write a setpoint frame and return True when the inverter ACKs Ok."""
         frame = build_setpoint_percent(pct)
         self._port.reset_input_buffer()
         self._port.write(frame)
+        ack = read_complete_frame(self._port, timeout_s=0.5)
+        if ack is None:
+            if self._verbose:
+                print(f"Setpoint {pct:.1f} %: no ACK")
+            return False
+        result = process_steca485(ack)
+        if result and len(result) >= 6 and isinstance(result[5], tuple):
+            status, name = result[5]
+            ok = (status == 0)
+            if self._verbose:
+                print(f"Setpoint {pct:.1f} % ({round(pct*10):d} ‰): ACK {name}"
+                      f" {'✓' if ok else '✗'}")
+            return ok
         if self._verbose:
-            print(f"Setpoint sent: {pct:.1f} %  ({round(pct * 10):d} ‰)")
-        # Read (and discard) the ACK so it doesn't pollute the next response
-        time.sleep(0.15)
-        self._port.reset_input_buffer()
+            print(f"Setpoint {pct:.1f} %: ACK parse failed")
+        return False
+
+    def _handle_setpoint(self):
+        """Send the current setpoint to the inverter when needed.
+
+        < 100 %: re-send every cycle — the inverter resets its setpoint after
+                 ~1 min so continuous repetition is required.
+        = 100 %: send once and stop after the inverter confirms it.
+        """
+        with self._limit_lock:
+            pct       = self._limit_pct
+            confirmed = self._limit_confirmed
+
+        if pct is None:
+            return
+        if pct >= 100.0 and confirmed:
+            return  # already sent and ACKed, no need to repeat
+
+        ok = self._send_setpoint(pct)
+        if ok and pct >= 100.0:
+            with self._limit_lock:
+                self._limit_confirmed = True
 
     # ── MQTT connect loop ─────────────────────────────────────────────────────
     def _connect_mqtt(self):
@@ -164,8 +280,8 @@ class StecaMqttService:
 
         self._connect_mqtt()
 
-        base             = self._cfg["topic"]
-        poll_interval    = float(self._cfg.get("poll_interval_s", 5))
+        base               = self._cfg["topic"]
+        poll_interval      = float(self._cfg.get("poll_interval_s", 5))
         values_of_interest = self._cfg.get("values_of_interest", list(METRICS))
 
         try:
@@ -194,20 +310,20 @@ class StecaMqttService:
                         continue
 
                     try:
-                        payload    = float(fval)
+                        # String metrics (e.g. serial number) publish as-is
+                        payload    = fval if isinstance(fval, str) else float(fval)
                         mqtt_topic = f"{base}/{name}"
                         pub = self._mqtt.publish(mqtt_topic, payload=payload, qos=0)
                         pub.wait_for_publish()
                         if self._verbose:
-                            print(f"MQTT ← {mqtt_topic}: {payload} {unit}")
+                            print(f"MQTT ← {mqtt_topic}: {payload} {unit}".rstrip())
                     except Exception as e:
                         print(f"MQTT publish failed for {name}: {e}")
                         while not self._mqtt.is_connected():
                             print("MQTT: waiting for reconnect …")
                             time.sleep(5)
 
-                # Apply power-limit setpoint (only if < 100 %)
-                self._send_setpoint_if_limited()
+                self._handle_setpoint()
 
                 time.sleep(poll_interval)
 

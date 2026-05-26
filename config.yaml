@@ -9,11 +9,18 @@ mqtt_password: 'xyzxyz'
 serial_device: /dev/ttyS0
 
 # Base MQTT topic.  Metrics are published as <topic>/<METRIC_NAME>.
-# The power-limit setpoint is read from <topic>/setpoint/power_limit_percent.
+# The power-limit setpoint is read from <topic>/setpoint/power_limit_percent
+# and its current value is reflected at  <topic>/setpoint/power_limit_percent/state.
 topic: DS18/PV/StecaGrid_3600
 
 # Poll interval in seconds between inverter query cycles
 poll_interval_s: 5
+
+# Home Assistant MQTT autodiscovery
+# Set ha_discovery: true to publish sensor + number entity configs on connect.
+ha_discovery: false
+ha_discovery_prefix: homeassistant   # default HA discovery prefix
+ha_device_name: StecaGrid 3600       # friendly name shown in HA
 
 # Metrics to publish.  Remove or comment out lines to skip individual values.
 # Available metrics:
