@@ -1,29 +1,32 @@
 # StecaGrid 3600 MQTT Service configuration
 
-# MQTT broker
+# ── MQTT broker ───────────────────────────────────────────────────────────────
 mqtt_broker_address: 'nas.ds18'
 mqtt_username: 'mqtt_user'
 mqtt_password: 'xyzxyz'
 
-# RS485 serial port
+# ── RS485 serial port (shared by all inverters on the bus) ────────────────────
 serial_device: /dev/ttyS0
 
-# Base MQTT topic.  Metrics are published as <topic>/<METRIC_NAME>.
-# The power-limit setpoint is read from <topic>/setpoint/power_limit_percent
-# and its current value is reflected at  <topic>/setpoint/power_limit_percent/state.
-topic: DS18/PV/StecaGrid_3600
-
-# Poll interval in seconds between inverter query cycles
+# ── Poll interval in seconds ──────────────────────────────────────────────────
 poll_interval_s: 5
 
-# Home Assistant MQTT autodiscovery
+# ── Home Assistant MQTT autodiscovery ─────────────────────────────────────────
 # Set ha_discovery: true to publish sensor + number entity configs on connect.
+# Each inverter becomes a separate HA device.
 ha_discovery: false
 ha_discovery_prefix: homeassistant   # default HA discovery prefix
-ha_device_name: StecaGrid 3600       # friendly name shown in HA
 
-# Metrics to publish.  Remove or comment out lines to skip individual values.
-# Available metrics:
+# ── Inverters ─────────────────────────────────────────────────────────────────
+# One section per inverter on the RS485 bus.
+#
+# id    – RS485 address of the inverter (default: 1)
+# name  – friendly name used in log output and HA device name
+# topic – MQTT base topic; metrics published as <topic>/<METRIC_NAME>
+#         Setpoint command : <topic>/setpoint/power_limit_percent
+#         Setpoint state   : <topic>/setpoint/power_limit_percent/state
+#
+# values_of_interest – metrics to query and publish. Available values:
 #   CURRENT_ELECTRICITY_DELIVERY  – AC output power (W)
 #   ELECTRICITY_EXPORTED_TOTAL    – Total lifetime yield (Wh)
 #   CURRENT_DAILY_YIELD           – Today's yield so far (Wh)
@@ -31,11 +34,25 @@ ha_device_name: StecaGrid 3600       # friendly name shown in HA
 #   CURRENT_PANEL_VOLTAGE         – DC panel voltage (V)
 #   CURRENT_PANEL_CURRENT         – DC panel current (A)
 #   SG_SERIAL                     – Inverter serial number (string)
-values_of_interest:
-  - CURRENT_ELECTRICITY_DELIVERY
-  - ELECTRICITY_EXPORTED_TOTAL
-  - CURRENT_DAILY_YIELD
-  - CURRENT_PANEL_POWER
-  - CURRENT_PANEL_VOLTAGE
-  - CURRENT_PANEL_CURRENT
-  - SG_SERIAL
+
+inverters:
+  - id: 1
+    name: StecaGrid 3600
+    topic: DS18/PV/StecaGrid_3600
+    values_of_interest:
+      - CURRENT_ELECTRICITY_DELIVERY
+      - ELECTRICITY_EXPORTED_TOTAL
+      - CURRENT_DAILY_YIELD
+      - CURRENT_PANEL_POWER
+      - CURRENT_PANEL_VOLTAGE
+      - CURRENT_PANEL_CURRENT
+      - SG_SERIAL
+
+  # Example: second inverter at RS485 address 2
+  # - id: 2
+  #   name: StecaGrid 3600 (Garage)
+  #   topic: DS18/PV/StecaGrid_3600_Garage
+  #   values_of_interest:
+  #     - CURRENT_ELECTRICITY_DELIVERY
+  #     - ELECTRICITY_EXPORTED_TOTAL
+  #     - CURRENT_DAILY_YIELD

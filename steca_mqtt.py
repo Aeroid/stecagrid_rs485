@@ -2,27 +2,33 @@
 """
 steca_mqtt.py — MQTT bridge for StecaGrid 3600 RS485.
 
-Polls the inverter via RS485, publishes live metrics to MQTT, and subscribes to
-a setpoint topic so a home-automation controller can throttle output power.
+Polls one or more inverters on the same RS485 bus, publishes live metrics per
+inverter, and accepts per-inverter power-limit setpoints via MQTT.
 
-Power-limit flow
-----------------
-  Subscribe : <base_topic>/setpoint/power_limit_percent   (float 0.0–100.0)
-  State     : <base_topic>/setpoint/power_limit_percent/state
-  Metrics   : <base_topic>/<METRIC_NAME>
+Config format
+-------------
+  inverters:          # list of inverter sections
+    - id: 1           # RS485 address (default 1)
+      name: ...       # friendly name
+      topic: ...      # MQTT base topic for this inverter
+      values_of_interest: [...]   # subset of METRICS to publish
 
-Setpoint behaviour
-------------------
-- < 100 %: frame is re-sent every poll cycle because the inverter resets its
-  setpoint after ~1 min.  Sending continues until a new value arrives.
-- = 100 %: frame is sent once and repeated only until the inverter ACKs it
-  (status Ok).  After that no further write traffic is produced.
+Backward-compatible: if no  inverters:  key is present the old flat
+  topic / values_of_interest  keys are used with id=1.
+
+Power-limit flow (per inverter)
+--------------------------------
+  Subscribe : <inv_topic>/setpoint/power_limit_percent   (float 0.0–100.0)
+  State     : <inv_topic>/setpoint/power_limit_percent/state
+  Metrics   : <inv_topic>/<METRIC_NAME>
+
+  < 100 %: frame re-sent every poll cycle (inverter resets after ~1 min).
+  = 100 %: sent once; repeated until the inverter ACKs Ok, then silent.
 
 Home Assistant MQTT autodiscovery
 ----------------------------------
-Enable with  ha_discovery: true  in config.yaml.  Sensor and number (setpoint)
-entities are announced under  <ha_discovery_prefix>/sensor/  and
-<ha_discovery_prefix>/number/  with retain=True on every MQTT connect.
+Enable with  ha_discovery: true.  One HA device per inverter is created
+under  <ha_discovery_prefix>/sensor/  and  /number/  (retain=True).
 """
 
 import argparse
@@ -49,26 +55,24 @@ _DEFAULT_CONFIG = "config.yaml"
 
 # ── Metric definitions ────────────────────────────────────────────────────────
 # name → (topic_key in TOPICS dict, result-extractor)
-# extractor(val) receives results[5] from getStecaGridResult; returns (value, unit_str)
-# value may be float or str; unit_str is for logging only.
+# extractor(val) → (value: float|str, unit: str)
 def _float_unit(val):
     if isinstance(val, list) and len(val) >= 2:
         return val[0], val[1]
     return None, None
 
 METRICS = {
-    "CURRENT_ELECTRICITY_DELIVERY": ("ac_power",      _float_unit),
-    "ELECTRICITY_EXPORTED_TOTAL":   ("total_yield",    _float_unit),
-    "CURRENT_DAILY_YIELD":          ("daily_yield",    _float_unit),
-    "CURRENT_PANEL_POWER":          ("panel_power",    _float_unit),
-    "CURRENT_PANEL_VOLTAGE":        ("panel_voltage",  _float_unit),
-    "CURRENT_PANEL_CURRENT":        ("panel_current",  _float_unit),
-    "SG_SERIAL":                    ("serial",         lambda v: (v[0] if isinstance(v, list) else v, "")),
+    "CURRENT_ELECTRICITY_DELIVERY": ("ac_power",    _float_unit),
+    "ELECTRICITY_EXPORTED_TOTAL":   ("total_yield",  _float_unit),
+    "CURRENT_DAILY_YIELD":          ("daily_yield",  _float_unit),
+    "CURRENT_PANEL_POWER":          ("panel_power",  _float_unit),
+    "CURRENT_PANEL_VOLTAGE":        ("panel_voltage",_float_unit),
+    "CURRENT_PANEL_CURRENT":        ("panel_current",_float_unit),
+    "SG_SERIAL": ("serial", lambda v: (v[0] if isinstance(v, list) else v, "")),
 }
 
 # ── Home Assistant autodiscovery metadata ─────────────────────────────────────
 # name → (friendly_name, device_class, unit_of_measurement, state_class)
-# device_class / unit / state_class may be None for string-value entities.
 _HA_SENSOR_META = {
     "CURRENT_ELECTRICITY_DELIVERY": ("AC Power",      "power",   "W",  "measurement"),
     "ELECTRICITY_EXPORTED_TOTAL":   ("Total Yield",   "energy",  "Wh", "total_increasing"),
@@ -80,25 +84,69 @@ _HA_SENSOR_META = {
 }
 
 
-def _node_id(base_topic: str) -> str:
-    """Derive a safe HA node_id from the MQTT base topic."""
-    return re.sub(r"[^a-zA-Z0-9_-]", "_", base_topic)
+def _node_id(topic: str) -> str:
+    """Derive a safe HA node_id / unique_id prefix from an MQTT topic."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", topic)
 
 
+# ── Per-inverter runtime state ────────────────────────────────────────────────
+class _InvState:
+    def __init__(self, inv_id: int, name: str, topic: str, values: list[str]):
+        self.inv_id = inv_id
+        self.name   = name
+        self.topic  = topic
+        self.values = values
+        # Setpoint (protected by lock)
+        self.limit_pct: float | None = None
+        self.limit_confirmed         = False
+        self.lock                    = threading.Lock()
+
+    @property
+    def setpoint_cmd_topic(self) -> str:
+        return f"{self.topic}/setpoint/power_limit_percent"
+
+    @property
+    def setpoint_state_topic(self) -> str:
+        return f"{self.topic}/setpoint/power_limit_percent/state"
+
+
+def _load_inverters(cfg: dict) -> list[_InvState]:
+    """Parse config into a list of _InvState; supports new and legacy formats."""
+    if "inverters" in cfg:
+        result = []
+        for entry in cfg["inverters"]:
+            inv_id = int(entry.get("id", 1))
+            result.append(_InvState(
+                inv_id = inv_id,
+                name   = str(entry.get("name", f"StecaGrid #{inv_id}")),
+                topic  = str(entry["topic"]),
+                values = list(entry.get("values_of_interest", list(METRICS))),
+            ))
+        return result
+
+    # Legacy flat format — single inverter, id=1
+    return [_InvState(
+        inv_id = 1,
+        name   = cfg.get("ha_device_name", "StecaGrid 3600"),
+        topic  = cfg["topic"],
+        values = list(cfg.get("values_of_interest", list(METRICS))),
+    )]
+
+
+# ── Service ───────────────────────────────────────────────────────────────────
 class StecaMqttService:
     def __init__(self, config: dict, verbose: bool = False):
-        self._cfg     = config
-        self._verbose = verbose
+        self._cfg      = config
+        self._verbose  = verbose
+        self._inverters: list[_InvState] = _load_inverters(config)
 
-        # Setpoint state (protected by _limit_lock)
-        self._limit_pct: float | None = None   # desired setpoint; None = not set
-        self._limit_confirmed = False           # True once inverter ACKed current value
-        self._limit_lock = threading.Lock()
+        # Map setpoint command topic → _InvState for fast lookup in on_message
+        self._setpoint_map: dict[str, _InvState] = {
+            inv.setpoint_cmd_topic: inv for inv in self._inverters
+        }
 
-        # Serial port (opened in run())
         self._port: serial.Serial | None = None
 
-        # MQTT client
         self._mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if "mqtt_username" in config:
             self._mqtt.username_pw_set(config["mqtt_username"],
@@ -114,92 +162,90 @@ class StecaMqttService:
             print(f"MQTT connect failed: reason={reason_code}")
             return
 
-        base  = self._cfg["topic"]
-        topic = f"{base}/setpoint/power_limit_percent"
-        client.subscribe(topic, qos=1)
-        if self._verbose:
-            print(f"MQTT connected, subscribed to {topic}")
+        for inv in self._inverters:
+            client.subscribe(inv.setpoint_cmd_topic, qos=1)
+            if self._verbose:
+                print(f"MQTT [{inv.name}] subscribed to {inv.setpoint_cmd_topic}")
 
         if self._cfg.get("ha_discovery", False):
             self._publish_ha_discovery()
 
-    def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
+    def _on_disconnect(self, client, userdata, flags, reason_code, properties):
         if self._verbose:
             print(f"MQTT disconnected (reason={reason_code}), will auto-reconnect")
 
     def _on_message(self, client, userdata, message):
+        inv = self._setpoint_map.get(message.topic)
+        if inv is None:
+            return
         try:
-            payload = message.payload.decode("utf-8").strip()
-            pct     = float(payload)
+            pct = float(message.payload.decode("utf-8").strip())
             if not 0.0 <= pct <= 100.0:
-                print(f"MQTT setpoint out of range: {pct}")
+                print(f"[{inv.name}] setpoint out of range: {pct}")
                 return
-            with self._limit_lock:
-                self._limit_pct       = pct
-                self._limit_confirmed = False   # new value must be (re-)sent
-            # Echo current setpoint to state topic so HA reflects it immediately
-            state_topic = f"{self._cfg['topic']}/setpoint/power_limit_percent/state"
-            self._mqtt.publish(state_topic, payload=pct, qos=0, retain=True)
+            with inv.lock:
+                inv.limit_pct       = pct
+                inv.limit_confirmed = False
+            self._mqtt.publish(inv.setpoint_state_topic,
+                               payload=pct, qos=0, retain=True)
             if self._verbose:
-                print(f"MQTT setpoint received: {pct:.1f} %")
+                print(f"[{inv.name}] setpoint received: {pct:.1f} %")
         except ValueError:
-            print(f"MQTT setpoint invalid payload: {message.payload!r}")
+            print(f"[{inv.name}] setpoint invalid payload: {message.payload!r}")
 
     # ── Home Assistant autodiscovery ──────────────────────────────────────────
     def _publish_ha_discovery(self):
-        base    = self._cfg["topic"]
-        prefix  = self._cfg.get("ha_discovery_prefix", "homeassistant")
-        devname = self._cfg.get("ha_device_name", "StecaGrid 3600")
-        node    = _node_id(base)
+        prefix = self._cfg.get("ha_discovery_prefix", "homeassistant")
 
-        device = {
-            "identifiers": [node],
-            "name":         devname,
-            "model":        "StecaGrid 3600",
-            "manufacturer": "Steca",
-        }
-
-        for metric, (fname, dclass, unit, sclass) in _HA_SENSOR_META.items():
-            cfg: dict = {
-                "name":        fname,
-                "state_topic": f"{base}/{metric}",
-                "unique_id":   f"{node}_{metric}",
-                "device":      device,
+        for inv in self._inverters:
+            node   = _node_id(inv.topic)
+            device = {
+                "identifiers": [node],
+                "name":         inv.name,
+                "model":        "StecaGrid 3600",
+                "manufacturer": "Steca",
             }
-            if dclass:
-                cfg["device_class"] = dclass
-            if unit:
-                cfg["unit_of_measurement"] = unit
-            if sclass:
-                cfg["state_class"] = sclass
 
-            disc_topic = f"{prefix}/sensor/{node}/{metric}/config"
-            self._mqtt.publish(disc_topic,
-                               payload=json.dumps(cfg), qos=1, retain=True)
+            for metric in inv.values:
+                if metric not in _HA_SENSOR_META:
+                    continue
+                fname, dclass, unit, sclass = _HA_SENSOR_META[metric]
+                cfg: dict = {
+                    "name":        fname,
+                    "state_topic": f"{inv.topic}/{metric}",
+                    "unique_id":   f"{node}_{metric}",
+                    "device":      device,
+                }
+                if dclass:
+                    cfg["device_class"] = dclass
+                if unit:
+                    cfg["unit_of_measurement"] = unit
+                if sclass:
+                    cfg["state_class"] = sclass
+
+                disc = f"{prefix}/sensor/{node}/{metric}/config"
+                self._mqtt.publish(disc, payload=json.dumps(cfg), qos=1, retain=True)
+                if self._verbose:
+                    print(f"HA discovery → {disc}")
+
+            # Number entity for the power-limit setpoint
+            num_cfg = {
+                "name":                "Power Limit",
+                "command_topic":       inv.setpoint_cmd_topic,
+                "state_topic":         inv.setpoint_state_topic,
+                "min":                 0,
+                "max":                 100,
+                "step":                1,
+                "unit_of_measurement": "%",
+                "icon":                "mdi:solar-power",
+                "unique_id":           f"{node}_power_limit_percent",
+                "device":              device,
+                "optimistic":          False,
+            }
+            disc = f"{prefix}/number/{node}/power_limit_percent/config"
+            self._mqtt.publish(disc, payload=json.dumps(num_cfg), qos=1, retain=True)
             if self._verbose:
-                print(f"HA discovery → {disc_topic}")
-
-        # Number entity for power-limit setpoint
-        setpoint_cmd   = f"{base}/setpoint/power_limit_percent"
-        setpoint_state = f"{setpoint_cmd}/state"
-        num_cfg = {
-            "name":                "Power Limit",
-            "command_topic":       setpoint_cmd,
-            "state_topic":         setpoint_state,
-            "min":                 0,
-            "max":                 100,
-            "step":                1,
-            "unit_of_measurement": "%",
-            "icon":                "mdi:solar-power",
-            "unique_id":           f"{node}_power_limit_percent",
-            "device":              device,
-            "optimistic":          False,
-        }
-        disc_topic = f"{prefix}/number/{node}/power_limit_percent/config"
-        self._mqtt.publish(disc_topic,
-                           payload=json.dumps(num_cfg), qos=1, retain=True)
-        if self._verbose:
-            print(f"HA discovery → {disc_topic}")
+                print(f"HA discovery → {disc}")
 
     # ── Serial helpers ────────────────────────────────────────────────────────
     def _open_port(self) -> serial.Serial:
@@ -210,55 +256,48 @@ class StecaMqttService:
             timeout=1, xonxoff=0, rtscts=0,
         )
 
-    def _query(self, topic_key: str):
-        """Send a read request, return raw results[5] or None."""
+    def _query(self, inv_id: int, topic_key: str):
         topic_byte, cmd_byte = TOPICS[topic_key]
-        req = build_request(0x01, topic_byte, cmd_byte)
+        req = build_request(inv_id, topic_byte, cmd_byte)
         return getStecaGridResult(self._port, req)
 
     # ── Setpoint logic ────────────────────────────────────────────────────────
-    def _send_setpoint(self, pct: float) -> bool:
-        """Write a setpoint frame and return True when the inverter ACKs Ok."""
-        frame = build_setpoint_percent(pct)
+    def _send_setpoint(self, inv: _InvState, pct: float) -> bool:
+        """Send a setpoint frame addressed to inv; return True on ACK Ok."""
+        frame = build_setpoint_percent(pct, to=inv.inv_id)
         self._port.reset_input_buffer()
         self._port.write(frame)
         ack = read_complete_frame(self._port, timeout_s=0.5)
         if ack is None:
             if self._verbose:
-                print(f"Setpoint {pct:.1f} %: no ACK")
+                print(f"[{inv.name}] setpoint {pct:.1f} %: no ACK")
             return False
         result = process_steca485(ack)
         if result and len(result) >= 6 and isinstance(result[5], tuple):
-            status, name = result[5]
+            status, sname = result[5]
             ok = (status == 0)
             if self._verbose:
-                print(f"Setpoint {pct:.1f} % ({round(pct*10):d} ‰): ACK {name}"
-                      f" {'✓' if ok else '✗'}")
+                print(f"[{inv.name}] setpoint {pct:.1f} % ({round(pct*10):d} ‰):"
+                      f" ACK {sname} {'✓' if ok else '✗'}")
             return ok
         if self._verbose:
-            print(f"Setpoint {pct:.1f} %: ACK parse failed")
+            print(f"[{inv.name}] setpoint {pct:.1f} %: ACK parse failed")
         return False
 
-    def _handle_setpoint(self):
-        """Send the current setpoint to the inverter when needed.
-
-        < 100 %: re-send every cycle — the inverter resets its setpoint after
-                 ~1 min so continuous repetition is required.
-        = 100 %: send once and stop after the inverter confirms it.
-        """
-        with self._limit_lock:
-            pct       = self._limit_pct
-            confirmed = self._limit_confirmed
+    def _handle_setpoint(self, inv: _InvState):
+        with inv.lock:
+            pct       = inv.limit_pct
+            confirmed = inv.limit_confirmed
 
         if pct is None:
             return
         if pct >= 100.0 and confirmed:
-            return  # already sent and ACKed, no need to repeat
+            return  # 100 % already ACKed, don't repeat
 
-        ok = self._send_setpoint(pct)
+        ok = self._send_setpoint(inv, pct)
         if ok and pct >= 100.0:
-            with self._limit_lock:
-                self._limit_confirmed = True
+            with inv.lock:
+                inv.limit_confirmed = True
 
     # ── MQTT connect loop ─────────────────────────────────────────────────────
     def _connect_mqtt(self):
@@ -276,54 +315,56 @@ class StecaMqttService:
     def run(self):
         self._port = self._open_port()
         if self._verbose:
-            print(f"Serial port opened: {self._port.port}")
+            names = ", ".join(f"{inv.name} (id={inv.inv_id})"
+                              for inv in self._inverters)
+            print(f"Serial port opened: {self._port.port}  |  inverters: {names}")
 
         self._connect_mqtt()
 
-        base               = self._cfg["topic"]
-        poll_interval      = float(self._cfg.get("poll_interval_s", 5))
-        values_of_interest = self._cfg.get("values_of_interest", list(METRICS))
+        poll_interval = float(self._cfg.get("poll_interval_s", 5))
 
         try:
             while True:
-                for name in values_of_interest:
-                    if name not in METRICS:
+                for inv in self._inverters:
+                    if self._verbose and len(self._inverters) > 1:
+                        print(f"\n── {inv.name} (id={inv.inv_id}) ──")
+
+                    for name in inv.values:
+                        if name not in METRICS:
+                            if self._verbose:
+                                print(f"[{inv.name}] unknown metric: {name}")
+                            continue
+
+                        topic_key, extractor = METRICS[name]
+                        val = self._query(inv.inv_id, topic_key)
+
                         if self._verbose:
-                            print(f"Unknown metric: {name}")
-                        continue
+                            print(f"[{inv.name}] {name}: raw={val!r}")
 
-                    topic_key, extractor = METRICS[name]
-                    val = self._query(topic_key)
+                        if val is None:
+                            continue
 
-                    if self._verbose:
-                        print(f"{name}: raw={val!r}")
+                        fval, unit = extractor(val)
+                        if fval is None:
+                            continue
 
-                    if val is None:
-                        continue
+                        if name == "ELECTRICITY_EXPORTED_TOTAL" and fval == 0:
+                            continue
 
-                    fval, unit = extractor(val)
-                    if fval is None:
-                        continue
+                        try:
+                            payload    = fval if isinstance(fval, str) else float(fval)
+                            mqtt_topic = f"{inv.topic}/{name}"
+                            pub = self._mqtt.publish(mqtt_topic, payload=payload, qos=0)
+                            pub.wait_for_publish()
+                            if self._verbose:
+                                print(f"MQTT ← {mqtt_topic}: {payload} {unit}".rstrip())
+                        except Exception as e:
+                            print(f"[{inv.name}] MQTT publish failed for {name}: {e}")
+                            while not self._mqtt.is_connected():
+                                print("MQTT: waiting for reconnect …")
+                                time.sleep(5)
 
-                    # Skip publishing zero total-yield (inverter offline / night)
-                    if name == "ELECTRICITY_EXPORTED_TOTAL" and fval == 0:
-                        continue
-
-                    try:
-                        # String metrics (e.g. serial number) publish as-is
-                        payload    = fval if isinstance(fval, str) else float(fval)
-                        mqtt_topic = f"{base}/{name}"
-                        pub = self._mqtt.publish(mqtt_topic, payload=payload, qos=0)
-                        pub.wait_for_publish()
-                        if self._verbose:
-                            print(f"MQTT ← {mqtt_topic}: {payload} {unit}".rstrip())
-                    except Exception as e:
-                        print(f"MQTT publish failed for {name}: {e}")
-                        while not self._mqtt.is_connected():
-                            print("MQTT: waiting for reconnect …")
-                            time.sleep(5)
-
-                self._handle_setpoint()
+                    self._handle_setpoint(inv)
 
                 time.sleep(poll_interval)
 
