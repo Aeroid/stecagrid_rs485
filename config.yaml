@@ -1,0 +1,34 @@
+# StecaGrid 3600 MQTT Service configuration
+
+# MQTT broker
+mqtt_broker_address: 'nas.ds18'
+mqtt_username: 'mqtt_user'
+mqtt_password: 'xyzxyz'
+
+# RS485 serial port
+serial_device: /dev/ttyS0
+
+# Base MQTT topic.  Metrics are published as <topic>/<METRIC_NAME>.
+# The power-limit setpoint is read from <topic>/setpoint/power_limit_percent.
+topic: DS18/PV/StecaGrid_3600
+
+# Poll interval in seconds between inverter query cycles
+poll_interval_s: 5
+
+# Metrics to publish.  Remove or comment out lines to skip individual values.
+# Available metrics:
+#   CURRENT_ELECTRICITY_DELIVERY  – AC output power (W)
+#   ELECTRICITY_EXPORTED_TOTAL    – Total lifetime yield (Wh)
+#   CURRENT_DAILY_YIELD           – Today's yield so far (Wh)
+#   CURRENT_PANEL_POWER           – DC panel power (W)
+#   CURRENT_PANEL_VOLTAGE         – DC panel voltage (V)
+#   CURRENT_PANEL_CURRENT         – DC panel current (A)
+#   SG_SERIAL                     – Inverter serial number (string)
+values_of_interest:
+  - CURRENT_ELECTRICITY_DELIVERY
+  - ELECTRICITY_EXPORTED_TOTAL
+  - CURRENT_DAILY_YIELD
+  - CURRENT_PANEL_POWER
+  - CURRENT_PANEL_VOLTAGE
+  - CURRENT_PANEL_CURRENT
+  - SG_SERIAL
