@@ -109,8 +109,8 @@ mosquitto_pub -t DS18/PV/StecaGrid_3600/setpoint/power_limit_percent -m 100
 ```
 
 **Behaviour:**
-- `< 100 %` — setpoint frame is re-sent every poll cycle. The inverter resets its setpoint
-  after ~1 min, so continuous repetition is required to maintain throttling.
+- `< 100 %` — setpoint frame is re-sent every poll cycle. The inverter might reset its setpoint,
+  so continuous repetition is used to maintain throttling.
 - `= 100 %` — frame is sent once and repeated until the inverter ACKs `Ok`, then silent.
   The bus stays quiet during normal full-power operation.
 
@@ -118,7 +118,8 @@ Under the hood this uses `steca_setpoint.build_setpoint_percent()` which sends a
 `WriteDataById (0x50)` on topic `0x0d` with a 16-bit big-endian permille value.
 
 > **⚠️ Warning** — do not send setpoints while a physical SEM energy manager is
-> connected to RS485 address `0x01`. Two-master collision will corrupt frames on the bus.
+> connected to RS485. You will risk bus collisions and conflicting settings, as
+> the SEM will repeatedly push the settings.
 
 ### Home Assistant autodiscovery
 
@@ -340,11 +341,6 @@ LEN = total frame length including STX (0x02) and ETX (0x03)
 | `0x68`  | UploadInternById       | `0x69`   |
 | `0x70`  | BootloaderConnect      | `0x71`   |
 
-### Authorization Levels
-
-`0`=User, `1`=Service, `2`=Development, `3`=Administrator.
-The software operates at Administrator level by default.
-
 ### Topic Map
 
 #### Inverter reads (TO=`0x01`)
@@ -518,11 +514,6 @@ python3 steca_sniffer.py --port /dev/ttyUSB0 --no-log
   Topic:   0x5a EventLog_p1
   CRC1:0x01[✓]  CRC2:0x0024[✓]  model=nibble_crc16
   → event_log(p1): 74 total, 20 entries
-
-[00:07:01] →SEM  TO=0x65 FROM=0x7b  LEN=103  SEM-7b
-  Topic:   0x0a EMConfig
-  CRC1:0xe3[✓]  CRC2:0x1a2b[✓]  model=nibble_crc16
-  → SetEMConfig mode=PowerLimit(2) limit=2000W nominal=3600W
 ```
 
 ---
